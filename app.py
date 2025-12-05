@@ -62,49 +62,6 @@ def calcular_rendimento(valor_investido, taxa_anual_percent, prazo_dias):
     taxa_diaria = (1 + taxa_anual) ** (1/365)
     return valor_investido * (taxa_diaria ** prazo_dias)
 
-# def calcular_investimento(data_inicio, data_fim, produto, tipo, valor_investido,
-#                           taxa_anual=None, cdi=None, percentual_cdi=None, taxa_custodia=0.0):
-#     prazo = calcular_prazo_em_dias(data_inicio, data_fim)
-#     tributavel = (produto == "CDB")
-
-#     if tipo == "Pré":
-#         taxa_efetiva = taxa_anual or 0.0
-#     else:
-#         taxa_efetiva = (percentual_cdi or 0.0) / 100 * (cdi or 0.0)
-
-#     bruto = calcular_rendimento(valor_investido, taxa_efetiva, prazo)
-#     rendimento = bruto - valor_investido
-
-#     iof = 0.0
-#     if tributavel and prazo < 30:
-#         iof = rendimento * aliquota_iof(prazo)
-
-#     imposto_ir = 0.0
-#     if tributavel:
-#         aliquota = obter_aliquota_ir(prazo)
-#         imposto_ir = (rendimento - iof) * aliquota
-
-#     custo_custodia = valor_investido * (taxa_custodia/100) * (prazo/365)
-
-#     liquido = bruto - imposto_ir - iof - custo_custodia
-#     rent_liq_pct = (liquido/valor_investido - 1) * 100 if valor_investido > 0 else 0
-#     rent_anual_pct = ((1 + rent_liq_pct/100) ** (365/prazo) - 1) * 100 if prazo > 0 else 0
-
-#     return {
-#         "produto": produto,
-#         "tipo": tipo,
-#         "taxa": taxa_efetiva,
-#         "prazo": prazo,
-#         "valor_investido": valor_investido,
-#         "valor_bruto": bruto,
-#         "iof": iof,
-#         "imposto_ir": imposto_ir,
-#         "custodia": custo_custodia,
-#         "valor_liquido": liquido,
-#         "rentabilidade": rent_liq_pct,
-#         "rentabilidade_anual": rent_anual_pct
-#     }
-
 def calcular_rendimento_variavel(valor_investido, taxa_inicial, taxa_final, prazo_dias):
     """
     Calcula o rendimento acumulado considerando que a taxa anual varia
@@ -197,23 +154,6 @@ def calcular_investimento(data_inicio, data_fim, produto, tipo, valor_investido,
         "rentabilidade_anual": rent_anual_pct
     }
 
-# def gerar_grafico(valor_investido, taxa_anual, prazo, produto, tipo, cdi=None, percentual_cdi=None, taxa_custodia=0.0):
-#     dias = list(range(1, prazo + 1))
-#     valores_liq = []
-#     for d in dias:
-#         parcial = calcular_investimento(
-#             date.today(), date.today() + timedelta(days=d), produto, tipo, valor_investido,
-#             taxa_anual=taxa_anual, cdi=cdi, percentual_cdi=percentual_cdi, taxa_custodia=taxa_custodia
-#         )
-#         valores_liq.append(parcial["valor_liquido"])
-#     fig, ax = plt.subplots(figsize=(7, 4))
-#     ax.plot(dias, valores_liq, label="Valor Líquido")
-#     ax.set_title("Evolução do Investimento")
-#     ax.set_xlabel("Dias")
-#     ax.set_ylabel("Valor (R$)")
-#     ax.legend()
-#     return fig
-
 # Atualizar a função gerar_grafico para aceitar cdi_fim
 def gerar_grafico(valor_investido, taxa_anual, prazo, produto, tipo, cdi=None, cdi_fim=None, percentual_cdi=None, taxa_custodia=0.0):
     dias = list(range(1, prazo + 1))
@@ -267,34 +207,7 @@ else:
 # --- Seção de Inputs ---
 with st.expander("💰 Configurações do Investimento", expanded=True):
     comparar = st.checkbox("Comparar dois investimentos?")
-
-    # def render_inputs(prefix):
-    #     st.subheader(prefix)
-    #     col1, col2 = st.columns(2)
-    #     with col1:
-    #         data_inicio = st.date_input("📆 Data início", value=date.today(), key=prefix+"_start")
-    #         data_fim = st.date_input("🗓️ Data fim", value=date.today()+timedelta(days=365), key=prefix+"_end")
-    #         produto = st.selectbox("🛍️ Produto", ("CDB","LCI","LCA"), key=prefix+"_produto")
-    #         tipo = st.selectbox("⚙️ Tipo de rendimento", ("Pré","Pós"), key=prefix+"_tipo")
-    #     with col2:
-    #         valor_investido = st.number_input("💵 Valor investido (R$)", min_value=100.0, value=1000.0, step=100.0, key=prefix+"_valor")
-    #         taxa_custodia = st.number_input("📉 Taxa de custódia (% ao ano)", min_value=0.0, value=0.0, step=0.1, format="%.2f", key=prefix+"_custodia")
-    #         taxa_anual = None
-    #         cdi = None
-    #         percentual_cdi = None
-    #         if tipo == "Pré":
-    #             taxa_anual = st.number_input("Taxa anual (%)", value=10.0, step=1.0, key=prefix+"_taxa")
-    #         else:
-    #             cdi = cdi_auto or st.number_input("CDI anual atual (%)", value=13.65, step=0.1, format="%.2f", key=prefix+"_cdi")
-    #             percentual_cdi = st.number_input("Percentual do CDI (%)", value=100.0, step=1.0, key=prefix+"_pcdi")
-        
-    #     # Validação de datas
-    #     if data_fim <= data_inicio:
-    #         st.error("A data de fim deve ser posterior à data de início.")
-    #         return None, None, None, None, None, None, None, None, None
-        
-    #     return data_inicio, data_fim, produto, tipo, valor_investido, taxa_anual, cdi, percentual_cdi, taxa_custodia
-
+    
     # Atualizar a função render_inputs para incluir a variavel cdi_fim
     def render_inputs(prefix):
         st.subheader(prefix)
@@ -346,10 +259,6 @@ with st.expander("💰 Configurações do Investimento", expanded=True):
             inv1 = calcular_investimento(*p1)
             inv2 = calcular_investimento(*p2)
         
-        # if p1 and p2:
-        #     inv1 = calcular_investimento(*p1)
-        #     inv2 = calcular_investimento(*p2)
-            
             with st.expander("📊 Comparativo dos Investimentos", expanded=True):
                 df = pd.DataFrame([inv1, inv2])
                 df_fmt = df.rename(columns={
@@ -373,9 +282,6 @@ with st.expander("💰 Configurações do Investimento", expanded=True):
     else:
         p = render_inputs("Investimento")
         
-        # if p:
-        #     inv = calcular_investimento(*p)
-
         if p and p[0] is not None:
             inv = calcular_investimento(*p)
             
@@ -401,10 +307,6 @@ with st.expander("💰 Configurações do Investimento", expanded=True):
                     value=f"{inv['rentabilidade_anual']:.2f}%"
                 )
             
-            # with col_secundaria:
-            #     fig = gerar_grafico(inv['valor_investido'], p[5], inv['prazo'], inv['produto'], inv['tipo'], p[6], p[7], p[8])
-            #     st.pyplot(fig)
-
             with col_secundaria:
                 # Atualize a chamada do gráfico passando os índices corretos
                 # p[0]=inicio, p[1]=fim, p[2]=prod, p[3]=tipo, p[4]=valor, 
@@ -425,4 +327,3 @@ with st.expander("💰 Configurações do Investimento", expanded=True):
                     st.write(f"**Imposto de Renda (IR):** {formatar_moeda(inv['imposto_ir'])}")
                     st.write(f"**Imposto sobre Operações Financeiras (IOF):** {formatar_moeda(inv['iof'])}")
                     st.write(f"**Taxa de Custódia:** {formatar_moeda(inv['custodia'])}")
-
