@@ -23,6 +23,9 @@ def formatar_moeda(valor: float) -> str:
     """Formata número como moeda brasileira (R$ 1.234,56)."""
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
+# --- Funções auxiliares de API com Cache ---
+
+@st.cache_data(ttl=3600)  # Cache os dados por 1 hora (3600 segundos) para evitar bloqueio
 def buscar_cdi():
     """
     Busca o CDI diário via API do Banco Central (série SGS 12)
@@ -30,17 +33,28 @@ def buscar_cdi():
     """
     url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.12/dados/ultimos/1?formato=json"
     try:
-        resp = requests.get(url, timeout=5)
+        # User-Agent ajuda a evitar bloqueios por "robô"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        resp = requests.get(url, timeout=10, headers=headers)
         resp.raise_for_status()
         dados = resp.json()
         valor_str = dados[0]["valor"]
+
+        # CDI diário em porcentagem
         cdi_diario_pct = float(valor_str.replace(",", "."))
         cdi_diario = cdi_diario_pct / 100.0
+
+        # Converte para taxa anualizada (252 dias úteis)
         cdi_anual = (1 + cdi_diario) ** 252 - 1
+
         return cdi_anual * 100  # em %
-    except Exception:
+    except Exception as e:
+        print(f"Erro CDI: {e}") # Imprime no terminal para debug
         return None
 
+@st.cache_data(ttl=3600) # Cache por 1 hora
 def buscar_ipca_focus():
     """
     Busca a expectativa de IPCA para os próximos 12 meses (Suavizada)
@@ -49,13 +63,18 @@ def buscar_ipca_focus():
     # Endpoint: ExpectativasMercadoInflacao12Meses
     url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoInflacao12Meses?$top=1&$orderby=Data desc&$filter=Indicador eq 'IPCA' and Suavizada eq 'S'"
     try:
-        resp = requests.get(url, timeout=5)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        # Aumentamos o timeout para 15 segundos, pois a API Olinda é lenta
+        resp = requests.get(url, timeout=15, headers=headers)
         resp.raise_for_status()
         data = resp.json()
         if data and "value" in data and len(data["value"]) > 0:
             return data["value"][0]["Mediana"]
         return None
-    except Exception:
+    except Exception as e:
+        print(f"Erro IPCA: {e}") # Imprime no terminal para debug
         return None
 
 def calcular_prazo_em_dias(start_date, end_date):
@@ -337,3 +356,4 @@ with st.expander("💰 Configurações do Investimento", expanded=True):
 
             if inv1['produto'] in PRODUTOS_ISENTOS:
                 st.info(f"ℹ️ O produto **{inv1['produto']}** é isento de IR para Pessoa Física.")
+
