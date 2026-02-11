@@ -14,56 +14,47 @@ try:
 except:
     locale.setlocale(locale.LC_ALL, "")
 
-# --- Constantes ---
-# Lista de produtos que não pagam IR para Pessoa Física
-PRODUTOS_ISENTOS = ["LCI", "LCA", "CRI", "CRA", "Debênture Incentivada"]
+# --- Funções auxiliares ---
 
-# --- Funções de API (Com Cache e Tratamento de Erro) ---
+def formatar_moeda(valor: float) -> str:
+    """Formata número como moeda brasileira (R$ 1.234,56)."""
+    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-@st.cache_data(ttl=3600)  # Cache de 1 hora
 def buscar_cdi():
-    """Busca o CDI atual no Banco Central."""
+    """
+    Busca o CDI diário via API do Banco Central (série SGS 12)
+    e converte para taxa anual (% a.a.).
+    """
     url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.12/dados/ultimos/1?formato=json"
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, timeout=5)
+        resp = requests.get(url, timeout=10)
         resp.raise_for_status()
         dados = resp.json()
         valor_str = dados[0]["valor"]
-        cdi_diario = float(valor_str.replace(",", ".")) / 100.0
-        return ((1 + cdi_diario) ** 252 - 1) * 100
+        cdi_diario_pct = float(valor_str.replace(",", "."))
+        cdi_diario = cdi_diario_pct / 100.0
+        cdi_anual = (1 + cdi_diario) ** 252 - 1
+        return cdi_anual * 100  # em %
     except Exception:
         return None
-
-@st.cache_data(ttl=3600) # Cache de 1 hora
-def buscar_ipca_focus():
-    """Busca a expectativa de IPCA (Focus) para 12 meses."""
-    # Endpoint simplificado
-    url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoInflacao12Meses?$top=1&$orderby=Data desc&$filter=Indicador eq 'IPCA'"
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
-        if "value" in data and len(data["value"]) > 0:
-            return data["value"][0]["Mediana"]
-        return None
-    except Exception:
-        return None
-
-# --- Funções de Cálculo ---
 
 def calcular_prazo_em_dias(start_date, end_date):
     return (end_date - start_date).days
 
 def obter_aliquota_ir(prazo_dias):
-    if prazo_dias <= 180: return 0.225
-    elif prazo_dias <= 360: return 0.20
-    elif prazo_dias <= 720: return 0.175
-    else: return 0.15
+    if prazo_dias <= 180:
+        return 0.225
+    elif prazo_dias <= 360:
+        return 0.20
+    elif prazo_dias <= 720:
+        return 0.175
+    else:
+        return 0.15
 
 def aliquota_iof(dias):
-    if dias >= 30: return 0.0
+    """Tabela regressiva IOF (0 a 30 dias)."""
+    if dias >= 30:
+        return 0.0
     return (30 - dias) / 30
 
 def calcular_rendimento(valor_investido, taxa_anual_percent, prazo_dias):
@@ -71,40 +62,69 @@ def calcular_rendimento(valor_investido, taxa_anual_percent, prazo_dias):
     taxa_diaria = (1 + taxa_anual) ** (1/365)
     return valor_investido * (taxa_diaria ** prazo_dias)
 
+def calcular_rendimento_variavel(valor_investido, taxa_inicial, taxa_final, prazo_dias):
+    """
+    Calcula o rendimento acumulado considerando que a taxa anual varia
+    linearmente da taxa_inicial até a taxa_final ao longo do prazo.
+    """
+    fator_acumulado = 1.0
+    
+    # Se o prazo for 0, não há rendimento
+    if prazo_dias <= 0:
+        return valor_investido
+
+    # Iteramos dia a dia para aplicar a taxa correspondente àquele dia na curva linear
+    for dia in range(prazo_dias):
+        # Interpolação linear da taxa anual para o dia atual
+        # No dia 0 é a taxa inicial, no último dia aproxima-se da taxa final
+        taxa_anual_dia = taxa_inicial + (taxa_final - taxa_inicial) * (dia / prazo_dias)
+        
+        # Converte a taxa anual do dia para taxa diária (base 365 conforme código original)
+        taxa_diaria = (1 + taxa_anual_dia) ** (1/365)
+        
+        fator_acumulado *= taxa_diaria
+        
+    return valor_investido * fator_acumulado
+
 def calcular_investimento(data_inicio, data_fim, produto, tipo, valor_investido,
-                          taxa_anual=None, cdi=None, percentual_cdi=None, 
-                          ipca_projetado=None, taxa_fixa_ipca=None, taxa_custodia=0.0):
-    
+                          taxa_anual=None, cdi=None, cdi_fim=None, percentual_cdi=None, taxa_custodia=0.0):
     prazo = calcular_prazo_em_dias(data_inicio, data_fim)
-    
-    # 1. Definição da Isenção Fiscal
-    isento = produto in PRODUTOS_ISENTOS
-    tributavel = not isento
+    tributavel = (produto == "CDB")
 
-    # 2. Definição da Taxa Efetiva Anual
-    taxa_efetiva = 0.0
+    bruto = 0.0
     
+    # Lógica de Rentabilidade
     if tipo == "Pré":
-        taxa_efetiva = taxa_anual or 0.0
+        # Cálculo Pré-fixado (Mantém lógica original de taxa constante)
+        taxa_efetiva = (taxa_anual or 0.0) / 100.0
+        taxa_diaria = (1 + taxa_efetiva) ** (1/365)
+        bruto = valor_investido * (taxa_diaria ** prazo)
+        taxa_media_exibicao = taxa_efetiva # Para fins de registro
         
-    elif tipo == "Pós (CDI)":
-        # Ex: 110% do CDI (onde CDI é ex: 13.65)
-        taxa_efetiva = (percentual_cdi or 0.0) / 100 * (cdi or 0.0)
+    else: # Pós-fixado
+        pct_cdi = (percentual_cdi or 0.0) / 100.0
+        cdi_i = (cdi or 0.0) / 100.0
         
-    elif tipo == "IPCA +":
-        # Fórmula de Fisher/Juros Compostos: (1 + IPCA) * (1 + Taxa Fixa) - 1
-        idx_ipca = (ipca_projetado or 0.0) / 100
-        idx_fixa = (taxa_fixa_ipca or 0.0) / 100
-        taxa_combinada = (1 + idx_ipca) * (1 + idx_fixa) - 1
-        taxa_efetiva = taxa_combinada * 100
+        # Se houver previsão de CDI final e for diferente do inicial
+        if cdi_fim is not None:
+            cdi_f = cdi_fim / 100.0
+            # A taxa efetiva aplicada varia dia a dia: (%CDI * CDI_do_dia)
+            taxa_inicial_efetiva = cdi_i * pct_cdi
+            taxa_final_efetiva = cdi_f * pct_cdi
+            
+            bruto = calcular_rendimento_variavel(valor_investido, taxa_inicial_efetiva, taxa_final_efetiva, prazo)
+            taxa_media_exibicao = (taxa_inicial_efetiva + taxa_final_efetiva) / 2 # Apenas aproximado para retorno
+        else:
+            # Cálculo Pós-fixado Clássico (CDI Constante)
+            taxa_efetiva = pct_cdi * cdi_i
+            taxa_diaria = (1 + taxa_efetiva) ** (1/365)
+            bruto = valor_investido * (taxa_diaria ** prazo)
+            taxa_media_exibicao = taxa_efetiva
 
-    # 3. Cálculo Financeiro
-    bruto = calcular_rendimento(valor_investido, taxa_efetiva, prazo)
     rendimento = bruto - valor_investido
 
-    # 4. Tributação (IOF e IR)
+    # --- Cálculo de Impostos (Mantido igual) ---
     iof = 0.0
-    # IOF incide apenas se for tributável E prazo curto
     if tributavel and prazo < 30:
         iof = rendimento * aliquota_iof(prazo)
 
@@ -113,10 +133,8 @@ def calcular_investimento(data_inicio, data_fim, produto, tipo, valor_investido,
         aliquota = obter_aliquota_ir(prazo)
         imposto_ir = (rendimento - iof) * aliquota
 
-    # 5. Custos
     custo_custodia = valor_investido * (taxa_custodia/100) * (prazo/365)
 
-    # 6. Resultados Finais
     liquido = bruto - imposto_ir - iof - custo_custodia
     rent_liq_pct = (liquido/valor_investido - 1) * 100 if valor_investido > 0 else 0
     rent_anual_pct = ((1 + rent_liq_pct/100) ** (365/prazo) - 1) * 100 if prazo > 0 else 0
@@ -124,7 +142,7 @@ def calcular_investimento(data_inicio, data_fim, produto, tipo, valor_investido,
     return {
         "produto": produto,
         "tipo": tipo,
-        "taxa": taxa_efetiva,
+        "taxa": taxa_media_exibicao, # Apenas referencial
         "prazo": prazo,
         "valor_investido": valor_investido,
         "valor_bruto": bruto,
@@ -136,203 +154,176 @@ def calcular_investimento(data_inicio, data_fim, produto, tipo, valor_investido,
         "rentabilidade_anual": rent_anual_pct
     }
 
-def gerar_grafico(valor_investido, prazo, taxa_efetiva):
-    """Gera gráfico da evolução do patrimônio BRUTO baseado na taxa efetiva."""
+# Atualizar a função gerar_grafico para aceitar cdi_fim
+def gerar_grafico(valor_investido, taxa_anual, prazo, produto, tipo, cdi=None, cdi_fim=None, percentual_cdi=None, taxa_custodia=0.0):
     dias = list(range(1, prazo + 1))
-    valores = []
+    valores_liq = []
     
-    # Taxa diária equivalente
-    taxa_diaria = (1 + taxa_efetiva/100) ** (1/365)
+    # Para o gráfico ficar correto na projeção, assumimos que a 'curva' de juros 
+    # se move conforme o tempo passa até o prazo final original.
     
-    saldo = valor_investido
-    for _ in dias:
-        saldo *= taxa_diaria
-        valores.append(saldo)
+    for d in dias:
+        # Nota: Ao calcular dias parciais, a lógica linear assume que se você sacar antes,
+        # o CDI variou proporcionalmente até aquele dia.
+        
+        # Se o CDI final for definido, calculamos qual seria o CDI 'final' para este sub-prazo 'd'
+        # ou mantemos a lógica de que a curva de juros é fixa no tempo. 
+        # Para simplificar a visualização: passamos o cdi_fim original. 
+        # A função calcular_investimento fará a interpolação interna de 0 até 'd'.
+        
+        # Ajuste fino: Se a previsão é 12% em 365 dias, no dia 180 a taxa momentânea é ~12.8%.
+        # Se passarmos cdi_fim=12 e prazo=180 para a função, ela vai achar que a taxa cai para 12 em 180 dias (queda mais brusca).
+        # Correção da projeção para o gráfico:
+        cdi_fim_ajustado = cdi_fim
+        if cdi_fim is not None and cdi is not None and prazo > 0:
+            # O CDI alvo no dia 'd' segue a reta original
+            cdi_fim_ajustado = cdi + (cdi_fim - cdi) * (d / prazo)
+
+        parcial = calcular_investimento(
+            date.today(), date.today() + timedelta(days=d), produto, tipo, valor_investido,
+            taxa_anual=taxa_anual, cdi=cdi, cdi_fim=cdi_fim_ajustado, percentual_cdi=percentual_cdi, taxa_custodia=taxa_custodia
+        )
+        valores_liq.append(parcial["valor_liquido"])
         
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(dias, valores, label="Evolução Bruta")
-    ax.set_title("Crescimento do Patrimônio (Bruto)")
+    ax.plot(dias, valores_liq, label="Valor Líquido")
+    ax.set_title("Evolução do Investimento")
     ax.set_xlabel("Dias")
     ax.set_ylabel("Valor (R$)")
     ax.legend()
     return fig
 
-def formatar_moeda(valor: float) -> str:
-    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-
 # --- Interface Streamlit ---
 
 st.title("📈 Calculadora de Rendimento — Renda Fixa")
-st.write("Calcule e compare CDB, LCI, LCA, CRI, CRA e Debêntures.")
+st.write("Calcule e compare CDB, LCI e LCA, considerando IR, IOF e taxa de custódia.")
 
-# --- Busca de Indicadores (Topo) ---
-col_inds1, col_inds2 = st.columns(2)
-
-# CDI
-with col_inds1:
-    cdi_auto = buscar_cdi()
-    if cdi_auto:
-        st.info(f"📊 **CDI Atual (BCB):** {cdi_auto:.2f}% ao ano")
-    else:
-        st.warning("⚠️ CDI: API indisponível (usando valor padrão).")
-
-# IPCA
-with col_inds2:
-    ipca_auto = buscar_ipca_focus()
-    if ipca_auto:
-        st.success(f"🏷️ **IPCA Projetado (Focus 12m):** {ipca_auto:.2f}%")
-    else:
-        st.caption("⚠️ API Focus instável. Usando IPCA padrão de mercado.")
+cdi_auto = buscar_cdi()
+if cdi_auto:
+    st.info(f"📊 CDI atual (BCB): **{cdi_auto:.2f}%** ao ano")
+else:
+    st.warning("⚠️ Não foi possível buscar o CDI automaticamente. Insira o valor manualmente.")
 
 # --- Seção de Inputs ---
 with st.expander("💰 Configurações do Investimento", expanded=True):
     comparar = st.checkbox("Comparar dois investimentos?")
-
+    
+    # Atualizar a função render_inputs para incluir a variavel cdi_fim
     def render_inputs(prefix):
         st.subheader(prefix)
         col1, col2 = st.columns(2)
         with col1:
             data_inicio = st.date_input("📆 Data início", value=date.today(), key=prefix+"_start")
             data_fim = st.date_input("🗓️ Data fim", value=date.today()+timedelta(days=365), key=prefix+"_end")
-            
-            # Nova lista de produtos
-            lista_produtos = (
-                "CDB", 
-                "LCI", 
-                "LCA", 
-                "CRI", 
-                "CRA", 
-                "Debênture Simples", 
-                "Debênture Incentivada"
-            )
-            produto = st.selectbox("🛍️ Produto", lista_produtos, key=prefix+"_produto")
-            
-            # Novos tipos de rendimento
-            tipo = st.selectbox("⚙️ Tipo de rendimento", ("Pré", "Pós (CDI)", "IPCA +"), key=prefix+"_tipo")
-        
+            produto = st.selectbox("🛍️ Produto", ("CDB","LCI","LCA"), key=prefix+"_produto")
+            tipo = st.selectbox("⚙️ Tipo de rendimento", ("Pré","Pós"), key=prefix+"_tipo")
         with col2:
             valor_investido = st.number_input("💵 Valor investido (R$)", min_value=100.0, value=1000.0, step=100.0, key=prefix+"_valor")
             taxa_custodia = st.number_input("📉 Taxa de custódia (% ao ano)", min_value=0.0, value=0.0, step=0.1, format="%.2f", key=prefix+"_custodia")
             
-            # Inicializa variáveis
             taxa_anual = None
             cdi = None
+            cdi_fim = None # Nova variável
             percentual_cdi = None
-            ipca_projetado = None
-            taxa_fixa_ipca = None
-
-            # Inputs Condicionais
+            
             if tipo == "Pré":
-                taxa_anual = st.number_input("Taxa pré-fixada (% a.a.)", value=12.0, step=0.5, key=prefix+"_taxa")
-            
-            elif tipo == "Pós (CDI)":
-                # Fallback CDI
-                val_cdi = cdi_auto if cdi_auto else 13.0
-                cdi = st.number_input("CDI anual base (% a.a.)", value=val_cdi, step=0.1, format="%.2f", key=prefix+"_cdi")
+                taxa_anual = st.number_input("Taxa anual (%)", value=10.0, step=1.0, key=prefix+"_taxa")
+            else:
+                cdi = cdi_auto or st.number_input("CDI anual atual (%)", value=13.65, step=0.1, format="%.2f", key=prefix+"_cdi")
+                
+                # Checkbox para habilitar projeção
+                usar_projecao = st.checkbox("Considerar previsão futura do CDI?", key=prefix+"_check_proj")
+                if usar_projecao:
+                    cdi_fim = st.number_input("CDI previsto no final (%)", value=cdi, step=0.1, format="%.2f", key=prefix+"_cdi_fim")
+                
                 percentual_cdi = st.number_input("Percentual do CDI (%)", value=100.0, step=1.0, key=prefix+"_pcdi")
-            
-            elif tipo == "IPCA +":
-                c_ipca1, c_ipca2 = st.columns(2)
-                with c_ipca1:
-                    taxa_fixa_ipca = st.number_input("Taxa Fixa (IPCA + ?)", value=6.0, step=0.5, format="%.2f", key=prefix+"_taxafixa")
-                with c_ipca2:
-                    # Fallback IPCA
-                    val_ipca = ipca_auto if ipca_auto else 4.50
-                    ipca_projetado = st.number_input("IPCA projetado (% a.a.)", value=val_ipca, step=0.1, format="%.2f", key=prefix+"_ipca")
-
-        # Validação
+        
         if data_fim <= data_inicio:
             st.error("A data de fim deve ser posterior à data de início.")
-            return None
+            # Retornamos None extra para manter consistência
+            return None, None, None, None, None, None, None, None, None, None 
         
-        return {
-            "data_inicio": data_inicio, "data_fim": data_fim, "produto": produto, "tipo": tipo,
-            "valor_investido": valor_investido, "taxa_anual": taxa_anual, 
-            "cdi": cdi, "percentual_cdi": percentual_cdi,
-            "ipca_projetado": ipca_projetado, "taxa_fixa_ipca": taxa_fixa_ipca,
-            "taxa_custodia": taxa_custodia
-        }
-
-    # Lógica de Execução
-    p1_params = None
-    p2_params = None
-
+        # Retorna também o cdi_fim
+        return data_inicio, data_fim, produto, tipo, valor_investido, taxa_anual, cdi, cdi_fim, percentual_cdi, taxa_custodia
+    
+    # Execução principal e exibição dos resultados
     if comparar:
         col1, col2 = st.columns(2)
-        with col1: p1_params = render_inputs("Investimento 1")
-        with col2: p2_params = render_inputs("Investimento 2")
-    else:
-        p1_params = render_inputs("Investimento")
+        with col1:
+            p1 = render_inputs("Investimento 1")
+        with col2:
+            p2 = render_inputs("Investimento 2")
 
-    # Processamento e Exibição
-    if p1_params:
-        inv1 = calcular_investimento(**p1_params)
+        # Verifica se p1 e p2 não são None (lembrando que agora retornam 10 itens)
+        if p1 and p2 and p1[0] is not None: 
+            inv1 = calcular_investimento(*p1)
+            inv2 = calcular_investimento(*p2)
         
-        inv2 = None
-        if comparar and p2_params:
-            inv2 = calcular_investimento(**p2_params)
-
-        # 1. Modo Comparação
-        if comparar and inv2:
-            st.markdown("---")
-            with st.expander("📊 Comparativo Detalhado", expanded=True):
+            with st.expander("📊 Comparativo dos Investimentos", expanded=True):
                 df = pd.DataFrame([inv1, inv2])
+                df_fmt = df.rename(columns={
+                    "produto": "Produto",
+                    "prazo": "Prazo (dias)",
+                    "valor_investido": "Valor Investido",
+                    "valor_liquido": "Valor Líquido",
+                    "rentabilidade_anual": "Rentabilidade Anual (%)"
+                })
+                df_exibicao = df_fmt[["Produto", "Prazo (dias)", "Valor Investido", "Valor Líquido", "Rentabilidade Anual (%)"]].copy()
+                df_exibicao["Valor Investido"] = df_exibicao["Valor Investido"].apply(formatar_moeda)
+                df_exibicao["Valor Líquido"] = df_exibicao["Valor Líquido"].apply(formatar_moeda)
+                df_exibicao["Rentabilidade Anual (%)"] = df_exibicao["Rentabilidade Anual (%)"].apply(lambda x: f"{x:.2f}%")
                 
-                # Formatação
-                df_fmt = df.copy()
-                cols_moeda = ["valor_investido", "valor_bruto", "valor_liquido", "imposto_ir", "iof", "custodia"]
-                for col in cols_moeda:
-                    df_fmt[col] = df_fmt[col].apply(formatar_moeda)
-                
-                df_fmt["taxa"] = df_fmt["taxa"].apply(lambda x: f"{x:.2f}%")
-                df_fmt["rentabilidade_anual"] = df_fmt["rentabilidade_anual"].apply(lambda x: f"{x:.2f}%")
-                
-                cols_finais = {
-                    "produto": "Produto", "tipo": "Tipo", "taxa": "Taxa Efetiva (a.a.)",
-                    "prazo": "Prazo (dias)", "valor_liquido": "Valor Líquido",
-                    "rentabilidade_anual": "Rentabilidade Anual"
-                }
-                
-                st.dataframe(df_fmt[cols_finais.keys()].rename(columns=cols_finais), hide_index=True, use_container_width=True)
-
+                st.dataframe(df_exibicao, hide_index=True, use_container_width=True)
                 melhor = "Investimento 1" if inv1["rentabilidade_anual"] > inv2["rentabilidade_anual"] else "Investimento 2"
                 st.success(f"🏆 **O melhor investimento é: {melhor}**")
-        
-        # 2. Modo Simples (Investimento 1)
         else:
+            st.warning("⚠️ Preencha os campos de ambos os investimentos para comparar.")
+
+    else:
+        p = render_inputs("Investimento")
+        
+        if p and p[0] is not None:
+            inv = calcular_investimento(*p)
+            
             st.markdown("---")
-            st.subheader("🎯 Resultado do Investimento")
+            st.subheader("🎯 Resultado do seu Investimento")
             
-            col_main, col_graph = st.columns([1, 1])
+            col_principal, col_secundaria = st.columns(2)
             
-            with col_main:
-                # Indicadores Principais
+            with col_principal:
                 st.metric(
-                    label="Valor Líquido Final",
-                    value=formatar_moeda(inv1['valor_liquido']),
-                    delta=f"Lucro Líquido: {formatar_moeda(inv1['valor_liquido'] - inv1['valor_investido'])}"
+                    label="💰 Valor Líquido Final",
+                    value=formatar_moeda(inv['valor_liquido']),
+                    delta=f"Ganho: {formatar_moeda(inv['valor_liquido'] - inv['valor_investido'])}"
                 )
                 
-                st.write("") # Espaçamento
+                st.metric(
+                    label="📊 Rentabilidade Líquida Total",
+                    value=f"{inv['rentabilidade']:.2f}%"
+                )
                 
-                # Exibição empilhada conforme solicitado
-                st.metric("Taxa Efetiva (Nominal)", f"{inv1['taxa']:.2f}% a.a.")
-                st.metric("Rentabilidade Realizada", f"{inv1['rentabilidade']:.2f}%")
+                st.metric(
+                    label="📈 Rentabilidade Anualizada",
+                    value=f"{inv['rentabilidade_anual']:.2f}%"
+                )
             
-            with col_graph:
-                fig = gerar_grafico(inv1['valor_investido'], inv1['prazo'], inv1['taxa'])
+            with col_secundaria:
+                # Atualize a chamada do gráfico passando os índices corretos
+                # p[0]=inicio, p[1]=fim, p[2]=prod, p[3]=tipo, p[4]=valor, 
+                # p[5]=taxa_anual, p[6]=cdi, p[7]=cdi_fim, p[8]=perc_cdi, p[9]=custodia
+                fig = gerar_grafico(
+                    inv['valor_investido'], p[5], inv['prazo'], inv['produto'], 
+                    inv['tipo'], cdi=p[6], cdi_fim=p[7], percentual_cdi=p[8], taxa_custodia=p[9]
+                )
                 st.pyplot(fig)
             
-            with st.expander("🧾 Extrato Detalhado"):
-                c1, c2, c3 = st.columns(3)
-                c1.write(f"**Investido:** {formatar_moeda(inv1['valor_investido'])}")
-                c1.write(f"**Bruto:** {formatar_moeda(inv1['valor_bruto'])}")
-                
-                c2.write(f"**IR Estimado:** {formatar_moeda(inv1['imposto_ir'])}")
-                c2.write(f"**IOF:** {formatar_moeda(inv1['iof'])}")
-                
-                c3.write(f"**Custódia:** {formatar_moeda(inv1['custodia'])}")
-                c3.write(f"**Líquido:** {formatar_moeda(inv1['valor_liquido'])}")
-
-            if inv1['produto'] in PRODUTOS_ISENTOS:
-                st.info(f"ℹ️ O produto **{inv1['produto']}** é isento de IR para Pessoa Física.")
+            with st.expander("🧾 Detalhes da Tributação e Custos"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write(f"**Prazo:** {inv['prazo']} dias")
+                    st.write(f"**Valor Investido:** {formatar_moeda(inv['valor_investido'])}")
+                    st.write(f"**Valor Bruto:** {formatar_moeda(inv['valor_bruto'])}")
+                with col2:
+                    st.write(f"**Imposto de Renda (IR):** {formatar_moeda(inv['imposto_ir'])}")
+                    st.write(f"**Imposto sobre Operações Financeiras (IOF):** {formatar_moeda(inv['iof'])}")
+                    st.write(f"**Taxa de Custódia:** {formatar_moeda(inv['custodia'])}")
