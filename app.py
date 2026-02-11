@@ -54,27 +54,29 @@ def buscar_cdi():
         print(f"Erro CDI: {e}") # Imprime no terminal para debug
         return None
 
-@st.cache_data(ttl=3600) # Cache por 1 hora
+@st.cache_data(ttl=3600)
 def buscar_ipca_focus():
     """
-    Busca a expectativa de IPCA para os próximos 12 meses (Suavizada)
-    do Boletim Focus via API Olinda do Banco Central.
+    Tenta buscar o IPCA; se falhar, retorna None silenciosamente.
     """
-    # Endpoint: ExpectativasMercadoInflacao12Meses
-    url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoInflacao12Meses?$top=1&$orderby=Data desc&$filter=Indicador eq 'IPCA' and Suavizada eq 'S'"
+    # URL Simplificada ordenando pela data mais recente
+    url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoInflacao12Meses?$top=1&$orderby=Data desc&$filter=Indicador eq 'IPCA'"
+    
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            "User-Agent": "Mozilla/5.0" # Simula um navegador simples
         }
-        # Aumentamos o timeout para 15 segundos, pois a API Olinda é lenta
-        resp = requests.get(url, timeout=15, headers=headers)
+        # Timeout curto (3s). Se demorar, assume que está fora do ar e usa o padrão.
+        resp = requests.get(url, headers=headers, timeout=3)
         resp.raise_for_status()
+        
         data = resp.json()
-        if data and "value" in data and len(data["value"]) > 0:
+        if "value" in data and len(data["value"]) > 0:
             return data["value"][0]["Mediana"]
         return None
-    except Exception as e:
-        print(f"Erro IPCA: {e}") # Imprime no terminal para debug
+        
+    except Exception:
+        # Não precisamos imprimir o erro, apenas assumir que falhou
         return None
 
 def calcular_prazo_em_dias(start_date, end_date):
@@ -197,22 +199,26 @@ def gerar_grafico(valor_investido, prazo, produto, tipo, taxa_efetiva):
 st.title("📈 Calculadora de Rendimento — Renda Fixa")
 st.write("Calcule e compare CDB, LCI, LCA, CRI, CRA e Debêntures.")
 
-# Buscar indicadores automáticos
+# --- Indicadores Econômicos ---
 col_inds1, col_inds2 = st.columns(2)
+
+# CDI
 with col_inds1:
     cdi_auto = buscar_cdi()
     if cdi_auto:
         st.info(f"📊 **CDI Atual (BCB):** {cdi_auto:.2f}% ao ano")
     else:
-        st.warning("⚠️ Erro ao buscar CDI.")
+        # Se falhar o CDI, mostramos um aviso discreto ou definimos um valor fixo depois
+        st.warning("⚠️ CDI: API Indisponível (Usando valor padrão nos cálculos)")
 
+# IPCA
 with col_inds2:
     ipca_auto = buscar_ipca_focus()
     if ipca_auto:
-        st.info(f"🏷️ **IPCA Projetado (Focus 12m):** {ipca_auto:.2f}%")
+        st.success(f"🏷️ **IPCA Projetado (Focus 12m):** {ipca_auto:.2f}%")
     else:
-        st.warning("⚠️ Erro ao buscar IPCA.")
-
+        # Se falhar, NÃO mostramos erro vermelho. Apenas informamos que será manual.
+        st.caption("⚠️ API do Focus instável. Usando IPCA padrão de mercado.")
 
 # --- Seção de Inputs ---
 with st.expander("💰 Configurações do Investimento", expanded=True):
@@ -248,14 +254,17 @@ with st.expander("💰 Configurações do Investimento", expanded=True):
             elif tipo == "Pós (CDI)":
                 cdi = cdi_auto or st.number_input("CDI anual base (% a.a.)", value=13.0, step=0.5, key=prefix+"_cdi")
                 percentual_cdi = st.number_input("Percentual do CDI (%)", value=100.0, step=1.0, key=prefix+"_pcdi")
-            
+
             elif tipo == "IPCA +":
                 col_ipca1, col_ipca2 = st.columns(2)
                 with col_ipca1:
                     taxa_fixa_ipca = st.number_input("Taxa Fixa (IPCA + ?)", value=6.0, step=0.5, format="%.2f", key=prefix+"_taxafixa")
                 with col_ipca2:
-                    val_ipca = ipca_auto if ipca_auto else 4.50
-                    ipca_projetado = st.number_input("IPCA projetado (% a.a.)", value=val_ipca, step=0.1, format="%.2f", key=prefix+"_ipca")
+                    # LÓGICA DE FALLBACK AQUI:
+                    # Se ipca_auto veio da API, usa ele. Se for None, usa 4.50 fixo.
+                    val_padrao = ipca_auto if ipca_auto else 4.50
+                    
+                    ipca_projetado = st.number_input("IPCA projetado (% a.a.)", value=val_padrao, step=0.1, format="%.2f", key=prefix+"_ipca")            
 
         # Validação de datas
         if data_fim <= data_inicio:
@@ -356,4 +365,5 @@ with st.expander("💰 Configurações do Investimento", expanded=True):
 
             if inv1['produto'] in PRODUTOS_ISENTOS:
                 st.info(f"ℹ️ O produto **{inv1['produto']}** é isento de IR para Pessoa Física.")
+
 
