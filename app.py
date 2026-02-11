@@ -17,7 +17,7 @@ except:
 # --- Constantes ---
 PRODUTOS_ISENTOS = ["LCI", "LCA", "CRI", "CRA", "Debênture Incentivada"]
 
-# --- Funções de API (Com Cache e Tratamento de Erro) ---
+# --- Funções de API (Com Cache) ---
 
 @st.cache_data(ttl=3600)
 def buscar_cdi():
@@ -36,7 +36,7 @@ def buscar_cdi():
 
 @st.cache_data(ttl=3600)
 def buscar_ipca_focus():
-    """Busca a expectativa de IPCA (Focus) para 12 meses."""
+    """Busca a expectativa de IPCA (Focus)."""
     url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoInflacao12Meses?$top=1&$orderby=Data desc&$filter=Indicador eq 'IPCA'"
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -65,40 +65,79 @@ def aliquota_iof(dias):
     return (30 - dias) / 30
 
 def calcular_rendimento(valor_investido, taxa_anual_percent, prazo_dias):
+    """Cálculo padrão para taxa constante."""
     taxa_anual = taxa_anual_percent / 100.0
     taxa_diaria = (1 + taxa_anual) ** (1/365)
     return valor_investido * (taxa_diaria ** prazo_dias)
 
+def calcular_rendimento_variavel(valor_investido, taxa_inicial, taxa_final, prazo_dias):
+    """
+    Calcula o rendimento com taxa variável (interpolação linear).
+    Útil para CDI que começa em X% e termina em Y%.
+    """
+    if prazo_dias <= 0: return valor_investido
+    
+    fator_acumulado = 1.0
+    # Itera dia a dia para compor a taxa que muda diariamente
+    for dia in range(prazo_dias):
+        # Taxa do dia específico (interpolação linear)
+        taxa_momento = taxa_inicial + (taxa_final - taxa_inicial) * (dia / prazo_dias)
+        
+        # Converte para base diária (365 dias)
+        taxa_diaria = (1 + taxa_momento/100.0) ** (1/365)
+        fator_acumulado *= taxa_diaria
+        
+    return valor_investido * fator_acumulado
+
 def calcular_investimento(data_inicio, data_fim, produto, tipo, valor_investido,
-                          taxa_anual=None, cdi=None, percentual_cdi=None, 
+                          taxa_anual=None, cdi=None, cdi_fim=None, percentual_cdi=None, 
                           ipca_projetado=None, taxa_fixa_ipca=None, taxa_custodia=0.0):
     
     prazo = calcular_prazo_em_dias(data_inicio, data_fim)
     
-    # 1. Definição da Isenção Fiscal
+    # Isenção
     isento = produto in PRODUTOS_ISENTOS
     tributavel = not isento
 
-    # 2. Definição da Taxa Efetiva Anual
-    taxa_efetiva = 0.0
+    # Cálculo do Bruto
+    bruto = 0.0
+    taxa_exibicao = 0.0 # Para mostrar na tela (média ou efetiva)
     
     if tipo == "Pré":
-        taxa_efetiva = taxa_anual or 0.0
+        taxa_exibicao = taxa_anual or 0.0
+        bruto = calcular_rendimento(valor_investido, taxa_exibicao, prazo)
         
     elif tipo == "Pós (CDI)":
-        taxa_efetiva = (percentual_cdi or 0.0) / 100 * (cdi or 0.0)
+        pct_cdi = (percentual_cdi or 0.0) / 100.0
+        val_cdi_ini = (cdi or 0.0)
+        
+        # Verifica se existe projeção de CDI final
+        if cdi_fim is not None:
+            val_cdi_fim = cdi_fim
+            
+            # As taxas efetivas aplicadas são (%CDI * CDI_do_Momento)
+            taxa_efetiva_ini = val_cdi_ini * pct_cdi
+            taxa_efetiva_fim = val_cdi_fim * pct_cdi
+            
+            bruto = calcular_rendimento_variavel(valor_investido, taxa_efetiva_ini, taxa_efetiva_fim, prazo)
+            
+            # Taxa média apenas para referência visual
+            taxa_exibicao = (taxa_efetiva_ini + taxa_efetiva_fim) / 2
+        else:
+            # Cálculo Padrão (CDI constante)
+            taxa_exibicao = val_cdi_ini * pct_cdi
+            bruto = calcular_rendimento(valor_investido, taxa_exibicao, prazo)
         
     elif tipo == "IPCA +":
         idx_ipca = (ipca_projetado or 0.0) / 100
         idx_fixa = (taxa_fixa_ipca or 0.0) / 100
-        taxa_combinada = (1 + idx_ipca) * (1 + idx_fixa) - 1
-        taxa_efetiva = taxa_combinada * 100
+        taxa_combinada = ((1 + idx_ipca) * (1 + idx_fixa) - 1) * 100
+        taxa_exibicao = taxa_combinada
+        bruto = calcular_rendimento(valor_investido, taxa_exibicao, prazo)
 
-    # 3. Cálculo Financeiro
-    bruto = calcular_rendimento(valor_investido, taxa_efetiva, prazo)
     rendimento = bruto - valor_investido
 
-    # 4. Tributação (IOF e IR)
+    # Tributação
     iof = 0.0
     if tributavel and prazo < 30:
         iof = rendimento * aliquota_iof(prazo)
@@ -108,10 +147,9 @@ def calcular_investimento(data_inicio, data_fim, produto, tipo, valor_investido,
         aliquota = obter_aliquota_ir(prazo)
         imposto_ir = (rendimento - iof) * aliquota
 
-    # 5. Custos
+    # Custos
     custo_custodia = valor_investido * (taxa_custodia/100) * (prazo/365)
 
-    # 6. Resultados Finais
     liquido = bruto - imposto_ir - iof - custo_custodia
     rent_liq_pct = (liquido/valor_investido - 1) * 100 if valor_investido > 0 else 0
     rent_anual_pct = ((1 + rent_liq_pct/100) ** (365/prazo) - 1) * 100 if prazo > 0 else 0
@@ -119,7 +157,7 @@ def calcular_investimento(data_inicio, data_fim, produto, tipo, valor_investido,
     return {
         "produto": produto,
         "tipo": tipo,
-        "taxa": taxa_efetiva,
+        "taxa": taxa_exibicao,
         "prazo": prazo,
         "valor_investido": valor_investido,
         "valor_bruto": bruto,
@@ -131,17 +169,30 @@ def calcular_investimento(data_inicio, data_fim, produto, tipo, valor_investido,
         "rentabilidade_anual": rent_anual_pct
     }
 
-def gerar_grafico(valor_investido, prazo, taxa_efetiva):
-    """Gera gráfico da evolução do patrimônio BRUTO."""
+def gerar_grafico(valor_investido, prazo, taxa_inicial, taxa_final=None):
+    """
+    Gera gráfico da evolução. Se taxa_final for fornecida, faz interpolação.
+    """
     dias = list(range(1, prazo + 1))
     valores = []
     
-    taxa_diaria = (1 + taxa_efetiva/100) ** (1/365)
     saldo = valor_investido
-    for _ in dias:
-        saldo *= taxa_diaria
-        valores.append(saldo)
-        
+    
+    # Se for taxa fixa (ou CDI constante)
+    if taxa_final is None or taxa_final == taxa_inicial:
+        taxa_diaria = (1 + taxa_inicial/100) ** (1/365)
+        for _ in dias:
+            saldo *= taxa_diaria
+            valores.append(saldo)
+    else:
+        # Taxa variável
+        for d in range(prazo):
+            # Recalcula a taxa do dia específico
+            taxa_momento = taxa_inicial + (taxa_final - taxa_inicial) * (d / prazo)
+            taxa_diaria = (1 + taxa_momento/100) ** (1/365)
+            saldo *= taxa_diaria
+            valores.append(saldo)
+            
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.plot(dias, valores, label="Evolução Bruta")
     ax.set_title("Crescimento do Patrimônio (Bruto)")
@@ -195,6 +246,7 @@ with st.expander("💰 Configurações do Investimento", expanded=True):
             
             taxa_anual = None
             cdi = None
+            cdi_fim = None # Variável para projeção
             percentual_cdi = None
             ipca_projetado = None
             taxa_fixa_ipca = None
@@ -204,7 +256,13 @@ with st.expander("💰 Configurações do Investimento", expanded=True):
             
             elif tipo == "Pós (CDI)":
                 val_cdi = cdi_auto if cdi_auto else 13.0
-                cdi = st.number_input("CDI anual base (% a.a.)", value=val_cdi, step=0.1, format="%.2f", key=prefix+"_cdi")
+                cdi = st.number_input("CDI anual atual (% a.a.)", value=val_cdi, step=0.1, format="%.2f", key=prefix+"_cdi")
+                
+                # Checkbox de Projeção
+                usar_projecao = st.checkbox("Projetar CDI futuro?", key=prefix+"_projecao")
+                if usar_projecao:
+                    cdi_fim = st.number_input("CDI previsto no final (% a.a.)", value=cdi, step=0.1, format="%.2f", key=prefix+"_cdi_fim")
+                
                 percentual_cdi = st.number_input("Percentual do CDI (%)", value=100.0, step=1.0, key=prefix+"_pcdi")
             
             elif tipo == "IPCA +":
@@ -222,7 +280,7 @@ with st.expander("💰 Configurações do Investimento", expanded=True):
         return {
             "data_inicio": data_inicio, "data_fim": data_fim, "produto": produto, "tipo": tipo,
             "valor_investido": valor_investido, "taxa_anual": taxa_anual, 
-            "cdi": cdi, "percentual_cdi": percentual_cdi,
+            "cdi": cdi, "cdi_fim": cdi_fim, "percentual_cdi": percentual_cdi,
             "ipca_projetado": ipca_projetado, "taxa_fixa_ipca": taxa_fixa_ipca,
             "taxa_custodia": taxa_custodia
         }
@@ -257,7 +315,7 @@ with st.expander("💰 Configurações do Investimento", expanded=True):
                 df_fmt["rentabilidade_anual"] = df_fmt["rentabilidade_anual"].apply(lambda x: f"{x:.2f}%")
                 
                 cols_finais = {
-                    "produto": "Produto", "tipo": "Tipo", "taxa": "Taxa Efetiva (a.a.)",
+                    "produto": "Produto", "tipo": "Tipo", "taxa": "Taxa Média/Efetiva",
                     "prazo": "Prazo (dias)", "valor_liquido": "Valor Líquido",
                     "rentabilidade_anual": "Rentabilidade Anual"
                 }
@@ -281,13 +339,24 @@ with st.expander("💰 Configurações do Investimento", expanded=True):
                 
                 st.write("") 
                 
-                # CORREÇÃO AQUI: As 3 métricas empilhadas
-                st.metric("Taxa Efetiva (Nominal)", f"{inv1['taxa']:.2f}% a.a.")
+                # Exibição das métricas
+                label_taxa = "Taxa Média (Estimada)" if inv1.get('cdi_fim_usado') else "Taxa Efetiva (Nominal)"
+                st.metric(label_taxa, f"{inv1['taxa']:.2f}% a.a.")
                 st.metric("Rentabilidade Realizada", f"{inv1['rentabilidade']:.2f}%")
                 st.metric("Rentabilidade Anualizada", f"{inv1['rentabilidade_anual']:.2f}%")
             
             with col_graph:
-                fig = gerar_grafico(inv1['valor_investido'], inv1['prazo'], inv1['taxa'])
+                # Prepara os dados para o gráfico (considerando se houve projeção ou não)
+                taxa_ini_graph = inv1['taxa']
+                taxa_fim_graph = None
+                
+                # Se for Pós (CDI) com projeção, precisamos recalcular as taxas para o gráfico
+                if inv1['tipo'] == "Pós (CDI)" and p1_params.get('cdi_fim'):
+                     pct = (p1_params['percentual_cdi'] or 0)/100
+                     taxa_ini_graph = (p1_params['cdi'] or 0) * pct
+                     taxa_fim_graph = (p1_params['cdi_fim'] or 0) * pct
+                
+                fig = gerar_grafico(inv1['valor_investido'], inv1['prazo'], taxa_ini_graph, taxa_fim_graph)
                 st.pyplot(fig)
             
             with st.expander("🧾 Extrato Detalhado"):
