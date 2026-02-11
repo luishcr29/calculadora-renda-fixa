@@ -1,7 +1,3 @@
-Aqui está o texto **corrigido e devidamente formatado em Markdown**, pronto para colar no seu `README.md`:
-
----
-
 # 💰 Calculadora de Renda Fixa (Brasil)
 
 Uma aplicação web interativa desenvolvida em **Python** e **Streamlit** para simular, comparar e analisar investimentos de **Renda Fixa no Brasil**.
