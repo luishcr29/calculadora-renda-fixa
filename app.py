@@ -335,16 +335,20 @@ with st.expander("💰 Configurações do Investimento", expanded=True):
             st.subheader("🎯 Resultado do Investimento")
             
             col_main, col_graph = st.columns([1, 1])
-            
+
             with col_main:
                 st.metric(
                     label="Valor Líquido Final",
                     value=formatar_moeda(inv1['valor_liquido']),
                     delta=f"Lucro Líquido: {formatar_moeda(inv1['valor_liquido'] - inv1['valor_investido'])}"
                 )
-                col_m1, col_m2 = st.columns(2)
-                col_m1.metric("Taxa Efetiva (Nominal)", f"{inv1['taxa']:.2f}% a.a.")
-                col_m2.metric("Rentabilidade Realizada", f"{inv1['rentabilidade']:.2f}%")
+                
+                # Adiciona um espaçamento visual (opcional, mas fica melhor)
+                st.write("") 
+                
+                # Exibe um abaixo do outro sequencialmente
+                st.metric("Taxa Efetiva (Nominal)", f"{inv1['taxa']:.2f}% a.a.")
+                st.metric("Rentabilidade Realizada", f"{inv1['rentabilidade']:.2f}%")
             
             with col_graph:
                 fig = gerar_grafico(
@@ -365,4 +369,5 @@ with st.expander("💰 Configurações do Investimento", expanded=True):
 
             if inv1['produto'] in PRODUTOS_ISENTOS:
                 st.info(f"ℹ️ O produto **{inv1['produto']}** é isento de IR para Pessoa Física.")
+
 
