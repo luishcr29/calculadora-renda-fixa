@@ -224,7 +224,7 @@ with st.expander("💰 Configurações do Investimento", expanded=True):
             tipo = st.selectbox("⚙️ Tipo de rendimento", ("Pré", "Pós (CDI)", "IPCA +"), key=prefix+"_tipo")
         
         with col2:
-            valor_investido = st.number_input("💵 Valor investido (R$)", min_value=100.0, value=1000.0, step=100.0, key=prefix+"_valor")
+            valor_investido = st.number_input("💵 Valor investido (R$)", min_value=100.0, value=100.0, step=100.0, key=prefix+"_valor")
             taxa_custodia = st.number_input("📉 Taxa de custódia (% ao ano)", min_value=0.0, value=0.0, step=0.1, format="%.2f", key=prefix+"_custodia")
             
             taxa_anual = None
